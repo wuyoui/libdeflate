@@ -112,9 +112,6 @@ struct hc_matchfinder {
 	/* The "next node" references for the linked lists.  The "next node" of
 	 * the node for the sequence with position 'pos' is 'next_tab[pos]'.  */
 	mf_pos_t next_tab[MATCHFINDER_WINDOW_SIZE];
-
-	mf_pos_t next_tab_rolling[MATCHFINDER_WINDOW_SIZE];
-
 }
 #ifdef _aligned_attribute
   _aligned_attribute(MATCHFINDER_ALIGNMENT)
@@ -231,7 +228,6 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 	mf->next_tab[cur_pos] = cur_node4;
 
 	*hroll_bucket(mf, hroll) = cur_pos;
-	mf->next_tab_rolling[cur_pos] = cur_rolling_node;
 
 	next_seq4 = load_u32_unaligned(in_next + 1);
 	next_hashes[0] = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
@@ -241,34 +237,22 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 
 	if (cur_rolling_node > cutoff) {
 
-		for (;;) {
-			__m128i match16;
-			__m128i neq;
+		__m128i match16;
+		__m128i neq;
 
-			matchptr = &in_base[cur_rolling_node];
+		matchptr = &in_base[cur_rolling_node];
 
-			STATIC_ASSERT(ROLLING_WINDOW_SIZE == 16);
+		STATIC_ASSERT(ROLLING_WINDOW_SIZE == 16);
 
-			match16 = _mm_loadu_si128((__m128i *)matchptr);
-			neq = _mm_xor_si128(match16, _mm_loadu_si128((__m128i *)in_next));
-			if (_mm_test_all_zeros(neq, neq)) {
-				len = lz_extend(in_next, matchptr, ROLLING_WINDOW_SIZE, max_len);
-				if (len > best_len) {
-					/* This is the new longest match.  */
-					best_len = len;
-					best_matchptr = matchptr;
-					if (best_len >= nice_len)
-						goto out;
-				}
-			}
-
-			cur_rolling_node = mf->next_tab_rolling[
-				cur_rolling_node & (MATCHFINDER_WINDOW_SIZE - 1)];
-			if (cur_rolling_node <= cutoff || !--depth_remaining)
-				break;
-		}
-		if (best_len >= ROLLING_WINDOW_SIZE)
+		match16 = _mm_loadu_si128((__m128i *)matchptr);
+		neq = _mm_xor_si128(match16, _mm_loadu_si128((__m128i *)in_next));
+		if (_mm_test_all_zeros(neq, neq)) {
+			len = lz_extend(in_next, matchptr, ROLLING_WINDOW_SIZE, max_len);
+			/* This is the new longest match.  */
+			best_len = len;
+			best_matchptr = matchptr;
 			goto out;
+		}
 	}
 
 	if (best_len < 4) {  /* No match of length >= 4 found yet?  */
@@ -411,7 +395,6 @@ hc_matchfinder_skip_positions(struct hc_matchfinder * const restrict mf,
 		mf->next_tab[cur_pos] = mf->hash4_tab[hash4];
 		mf->hash4_tab[hash4] = cur_pos;
 
-		mf->next_tab_rolling[cur_pos] = *hroll_bucket(mf, hroll);
 		*hroll_bucket(mf, hroll) = cur_pos;
 
 		next_seq4 = load_u32_unaligned(in_next + 1);
