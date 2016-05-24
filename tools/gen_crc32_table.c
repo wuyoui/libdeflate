@@ -12,10 +12,12 @@
  * <http://creativecommons.org/publicdomain/zero/1.0/>.
  */
 
+#include <string.h>
 #include <stdint.h>
 #include <stdio.h>
 
 static uint32_t crc32_table[0x800];
+static uint32_t crc32_rolling[0x100];
 
 static uint32_t
 crc32_update_bit(uint32_t remainder, uint8_t next_bit)
@@ -58,6 +60,13 @@ main(void)
 	for (int i = 0x100; i < 0x800; i++)
 		crc32_table[i] = crc32_update_byte(crc32_table[i - 0x100], 0);
 
+	for (int i = 0; i < 0x100; i++) {
+		uint32_t remainder = crc32_update_byte(0, i);
+		for (int j = 0; j < 16; j++)
+			remainder = crc32_update_byte(remainder, 0);
+		crc32_rolling[i] = remainder;
+	}
+
 	printf("/*\n");
 	printf(" * crc32_table.h - data table to accelerate CRC-32 computation\n");
 	printf(" *\n");
@@ -81,5 +90,30 @@ main(void)
 	print_256_entries(&crc32_table[0x700]);
 	printf("#endif /* CRC32_SLICE8 */\n");
 	printf("};\n");
+
+	printf("\n");
+	printf("static const uint32_t crc32_rolling[] = {\n");
+	print_256_entries(crc32_rolling);
+	printf("};\n");
+
+	/*
+	 * test
+	 */
+
+	/*const char *str = "abcdefghijklmnop aoeuaoeu abcdefghijklmnop aoeuaoeuhaoneuhaoeu aoeuaoeuhaoneuhaoeu";*/
+	/*size_t len = strlen(str);*/
+	/*uint32_t remainder = 0;*/
+	/*uint32_t hashes[len];*/
+	/*size_t i = 0;*/
+	/*for (; i < 16; i++)*/
+		/*remainder = crc32_update_byte(remainder, str[i]);*/
+	/*for (; i < len; i++) {*/
+		/*remainder = crc32_update_byte(remainder, str[i]) ^ crc32_rolling[str[i - 16]];*/
+		/*hashes[i] = remainder;*/
+		/*for (size_t j = 0; j < i; j++)*/
+			/*if (remainder == hashes[j])*/
+				/*printf("MATCH: %zu:%.*s %zu:%.*s\n", j-15, 16, &str[j-15], i-15, 16, &str[i-15]);*/
+	/*}*/
+
 	return 0;
 }

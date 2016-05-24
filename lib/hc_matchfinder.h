@@ -88,15 +88,18 @@
 
 #include "matchfinder_common.h"
 
+#include "crc32_table.h"
 #include <emmintrin.h>
 #include <smmintrin.h>
 
+#define ROLLING_WINDOW_SIZE 16
+
 #define HC_MATCHFINDER_HASH4_ORDER	16
-#define HC_MATCHFINDER_HASH16_ORDER	16
+#define HC_MATCHFINDER_HROLL_ORDER	16
 
 #define HC_MATCHFINDER_TOTAL_HASH_LENGTH	\
 	(1UL << HC_MATCHFINDER_HASH4_ORDER) +	\
-	(1UL << HC_MATCHFINDER_HASH16_ORDER)
+	(1UL << HC_MATCHFINDER_HROLL_ORDER)
 
 struct hc_matchfinder {
 
@@ -104,13 +107,13 @@ struct hc_matchfinder {
 	 * finding length 4+ matches  */
 	mf_pos_t hash4_tab[1UL << HC_MATCHFINDER_HASH4_ORDER];
 
-	mf_pos_t hash16_tab[1UL << HC_MATCHFINDER_HASH16_ORDER];
+	mf_pos_t hroll_tab[1UL << HC_MATCHFINDER_HROLL_ORDER];
 
 	/* The "next node" references for the linked lists.  The "next node" of
 	 * the node for the sequence with position 'pos' is 'next_tab[pos]'.  */
 	mf_pos_t next_tab[MATCHFINDER_WINDOW_SIZE];
 
-	mf_pos_t next16_tab[MATCHFINDER_WINDOW_SIZE];
+	mf_pos_t next_tab_rolling[MATCHFINDER_WINDOW_SIZE];
 
 }
 #ifdef _aligned_attribute
@@ -132,19 +135,23 @@ hc_matchfinder_slide_window(struct hc_matchfinder *mf)
 			   sizeof(struct hc_matchfinder) / sizeof(mf_pos_t));
 }
 
-#define HASH16_MULTIPLIER	31
-#define HASH16_POP_FACTOR	1353309697	/* 31**15 % (1<<32) */
-static u8 hash16_history[16];
-static u32 hash16_hindex;
 
-static forceinline u32 hash16_push(u32 sum, u8 byte)
+static u8 history[ROLLING_WINDOW_SIZE];
+static u32 hist_index;
+
+static forceinline u32
+hroll_update(u32 r, u8 byte)
 {
-	sum -= hash16_history[hash16_hindex] * HASH16_POP_FACTOR;
-	sum += byte;
-	sum *= HASH16_MULTIPLIER;
-	hash16_history[hash16_hindex++] = byte;
-	hash16_hindex %= ARRAY_LEN(hash16_history);
-	return sum;
+	r = (r >> 8) ^ crc32_table[(u8)r ^ byte] ^ crc32_rolling[history[hist_index]];
+	history[hist_index++] = byte;
+	hist_index %= ARRAY_LEN(history);
+	return r;
+}
+
+static forceinline mf_pos_t *
+hroll_bucket(struct hc_matchfinder *mf, u32 r)
+{
+	return &mf->hroll_tab[r >> (32 - HC_MATCHFINDER_HROLL_ORDER)];
 }
 
 /*
@@ -191,9 +198,9 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 {
 	u32 depth_remaining = max_search_depth;
 	const u8 *best_matchptr = in_next;
-	mf_pos_t cur_node4, cur_node16;
+	mf_pos_t cur_node4, cur_rolling_node;
 	u32 hash4;
-	u32 hash16;
+	u32 hroll;
 	u32 next_seq4;
 	u32 seq4;
 	const u8 *matchptr;
@@ -211,39 +218,41 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 	in_base = *in_base_p;
 	cutoff = cur_pos - MATCHFINDER_WINDOW_SIZE;
 
-	if (unlikely(max_len < 17))
+	if (unlikely(max_len < 1 + ROLLING_WINDOW_SIZE))
 		goto out;
 
 	hash4 = next_hashes[0];
-	hash16 = next_hashes[1];
+	hroll = next_hashes[1];
 
 	cur_node4 = mf->hash4_tab[hash4];
-	cur_node16 = mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)];
+	cur_rolling_node = *hroll_bucket(mf, hroll);
 
 	mf->hash4_tab[hash4] = cur_pos;
 	mf->next_tab[cur_pos] = cur_node4;
 
-	mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)] = cur_pos;
-	mf->next16_tab[cur_pos] = cur_node16;
+	*hroll_bucket(mf, hroll) = cur_pos;
+	mf->next_tab_rolling[cur_pos] = cur_rolling_node;
 
 	next_seq4 = load_u32_unaligned(in_next + 1);
 	next_hashes[0] = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
-	next_hashes[1] = hash16_push(next_hashes[1], *(in_next + 16));
+	next_hashes[1] = hroll_update(hroll, *(in_next + ROLLING_WINDOW_SIZE));
 	prefetchw(&mf->hash4_tab[next_hashes[0]]);
-	prefetchw(&mf->hash16_tab[next_hashes[1] % ARRAY_LEN(mf->hash16_tab)]);
+	prefetchw(hroll_bucket(mf, next_hashes[1]));
 
-	if (cur_node16 > cutoff) {
-		__m128i seq16 = _mm_loadu_si128((__m128i *)in_next);
+	if (cur_rolling_node > cutoff) {
+
 		for (;;) {
 			__m128i match16;
 			__m128i neq;
 
-			matchptr = &in_base[cur_node16];
-			match16 = _mm_loadu_si128((__m128i *)matchptr);
+			matchptr = &in_base[cur_rolling_node];
 
-			neq = _mm_xor_si128(match16, seq16);
+			STATIC_ASSERT(ROLLING_WINDOW_SIZE == 16);
+
+			match16 = _mm_loadu_si128((__m128i *)matchptr);
+			neq = _mm_xor_si128(match16, _mm_loadu_si128((__m128i *)in_next));
 			if (_mm_test_all_zeros(neq, neq)) {
-				len = lz_extend(in_next, matchptr, 16, max_len);
+				len = lz_extend(in_next, matchptr, ROLLING_WINDOW_SIZE, max_len);
 				if (len > best_len) {
 					/* This is the new longest match.  */
 					best_len = len;
@@ -253,10 +262,13 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 				}
 			}
 
-			cur_node16 = mf->next16_tab[cur_node16 & (MATCHFINDER_WINDOW_SIZE - 1)];
-			if (cur_node16 <= cutoff || !--depth_remaining)
+			cur_rolling_node = mf->next_tab_rolling[
+				cur_rolling_node & (MATCHFINDER_WINDOW_SIZE - 1)];
+			if (cur_rolling_node <= cutoff || !--depth_remaining)
 				break;
 		}
+		if (best_len >= ROLLING_WINDOW_SIZE)
+			goto out;
 	}
 
 	if (best_len < 4) {  /* No match of length >= 4 found yet?  */
@@ -377,16 +389,17 @@ hc_matchfinder_skip_positions(struct hc_matchfinder * const restrict mf,
 {
 	u32 cur_pos;
 	u32 hash4;
-	u16 hash16;
+	u32 hroll;
 	u32 next_seq4;
 	u32 remaining = count;
 
-	if (unlikely(count + 17 > in_end - in_next))
+
+	if (unlikely(count + 1 + ROLLING_WINDOW_SIZE > in_end - in_next))
 		return &in_next[count];
 
 	cur_pos = in_next - *in_base_p;
 	hash4 = next_hashes[0];
-	hash16 = next_hashes[1];
+	hroll = next_hashes[1];
 	do {
 		if (cur_pos == MATCHFINDER_WINDOW_SIZE) {
 			hc_matchfinder_slide_window(mf);
@@ -396,20 +409,20 @@ hc_matchfinder_skip_positions(struct hc_matchfinder * const restrict mf,
 		mf->next_tab[cur_pos] = mf->hash4_tab[hash4];
 		mf->hash4_tab[hash4] = cur_pos;
 
-		mf->next16_tab[cur_pos] = mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)];
-		mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)] = cur_pos;
+		mf->next_tab_rolling[cur_pos] = *hroll_bucket(mf, hroll);
+		*hroll_bucket(mf, hroll) = cur_pos;
 
 		next_seq4 = load_u32_unaligned(in_next + 1);
 		hash4 = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
-		hash16 = hash16_push(hash16, *(in_next + 16));
+		hroll = hroll_update(hroll, *(in_next + ROLLING_WINDOW_SIZE));
 		in_next++;
 		cur_pos++;
 	} while (--remaining);
 
 	prefetchw(&mf->hash4_tab[hash4]);
-	prefetchw(&mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)]);
+	prefetchw(hroll_bucket(mf, hroll));
 	next_hashes[0] = hash4;
-	next_hashes[1] = hash16;
+	next_hashes[1] = hroll;
 
 	return in_next;
 }
