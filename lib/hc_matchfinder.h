@@ -95,7 +95,7 @@
 #define ROLLING_WINDOW_SIZE 16
 
 #define HC_MATCHFINDER_HASH4_ORDER	16
-#define HC_MATCHFINDER_HROLL_ORDER	16
+#define HC_MATCHFINDER_HROLL_ORDER	15
 
 #define HC_MATCHFINDER_TOTAL_HASH_LENGTH	\
 	(1UL << HC_MATCHFINDER_HASH4_ORDER) +	\
@@ -236,20 +236,16 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 	prefetchw(hroll_bucket(mf, next_hashes[1]));
 
 	if (cur_rolling_node > cutoff) {
-
-		__m128i match16;
 		__m128i neq;
 
 		matchptr = &in_base[cur_rolling_node];
 
 		STATIC_ASSERT(ROLLING_WINDOW_SIZE == 16);
 
-		match16 = _mm_loadu_si128((__m128i *)matchptr);
-		neq = _mm_xor_si128(match16, _mm_loadu_si128((__m128i *)in_next));
+		neq = _mm_xor_si128(_mm_loadu_si128((__m128i *)matchptr),
+				    _mm_loadu_si128((__m128i *)in_next));
 		if (_mm_test_all_zeros(neq, neq)) {
-			len = lz_extend(in_next, matchptr, ROLLING_WINDOW_SIZE, max_len);
-			/* This is the new longest match.  */
-			best_len = len;
+			best_len = lz_extend(in_next, matchptr, ROLLING_WINDOW_SIZE, max_len);
 			best_matchptr = matchptr;
 			goto out;
 		}
