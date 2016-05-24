@@ -88,6 +88,9 @@
 
 #include "matchfinder_common.h"
 
+#include <emmintrin.h>
+#include <smmintrin.h>
+
 #define HC_MATCHFINDER_HASH4_ORDER	16
 #define HC_MATCHFINDER_HASH16_ORDER	16
 
@@ -130,15 +133,15 @@ hc_matchfinder_slide_window(struct hc_matchfinder *mf)
 }
 
 #define HASH16_MULTIPLIER	31
-#define HASH16_POP_FACTOR	1353309697	/* 31**16 % (1<<32) */
+#define HASH16_POP_FACTOR	1353309697	/* 31**15 % (1<<32) */
 static u8 hash16_history[16];
 static u32 hash16_hindex;
 
 static forceinline u32 hash16_push(u32 sum, u8 byte)
 {
 	sum -= hash16_history[hash16_hindex] * HASH16_POP_FACTOR;
-	sum *= HASH16_MULTIPLIER;
 	sum += byte;
+	sum *= HASH16_MULTIPLIER;
 	hash16_history[hash16_hindex++] = byte;
 	hash16_hindex %= ARRAY_LEN(hash16_history);
 	return sum;
@@ -211,23 +214,50 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 	if (unlikely(max_len < 17))
 		goto out;
 
-	/* Get the precomputed hash codes.  */
 	hash4 = next_hashes[0];
 	hash16 = next_hashes[1];
 
-	/* From the hash buckets, get the first node of each linked list.  */
 	cur_node4 = mf->hash4_tab[hash4];
-	cur_node16 = mf->hash16_tab[hash16];
+	cur_node16 = mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)];
 
-	/* Update for length 4 matches.  This prepends the node for the current
-	 * sequence to the linked list in the 'hash4' bucket.  */
 	mf->hash4_tab[hash4] = cur_pos;
 	mf->next_tab[cur_pos] = cur_node4;
 
-	/* Compute the next hash codes.  */
+	mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)] = cur_pos;
+	mf->next16_tab[cur_pos] = cur_node16;
+
 	next_seq4 = load_u32_unaligned(in_next + 1);
 	next_hashes[0] = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
+	next_hashes[1] = hash16_push(next_hashes[1], *(in_next + 16));
 	prefetchw(&mf->hash4_tab[next_hashes[0]]);
+	prefetchw(&mf->hash16_tab[next_hashes[1] % ARRAY_LEN(mf->hash16_tab)]);
+
+	if (cur_node16 > cutoff) {
+		__m128i seq16 = _mm_loadu_si128((__m128i *)in_next);
+		for (;;) {
+			__m128i match16;
+			__m128i neq;
+
+			matchptr = &in_base[cur_node16];
+			match16 = _mm_loadu_si128((__m128i *)matchptr);
+
+			neq = _mm_xor_si128(match16, seq16);
+			if (_mm_test_all_zeros(neq, neq)) {
+				len = lz_extend(in_next, matchptr, 16, max_len);
+				if (len > best_len) {
+					/* This is the new longest match.  */
+					best_len = len;
+					best_matchptr = matchptr;
+					if (best_len >= nice_len)
+						goto out;
+				}
+			}
+
+			cur_node16 = mf->next16_tab[cur_node16 & (MATCHFINDER_WINDOW_SIZE - 1)];
+			if (cur_node16 <= cutoff || !--depth_remaining)
+				break;
+		}
+	}
 
 	if (best_len < 4) {  /* No match of length >= 4 found yet?  */
 
@@ -347,6 +377,7 @@ hc_matchfinder_skip_positions(struct hc_matchfinder * const restrict mf,
 {
 	u32 cur_pos;
 	u32 hash4;
+	u16 hash16;
 	u32 next_seq4;
 	u32 remaining = count;
 
@@ -355,6 +386,7 @@ hc_matchfinder_skip_positions(struct hc_matchfinder * const restrict mf,
 
 	cur_pos = in_next - *in_base_p;
 	hash4 = next_hashes[0];
+	hash16 = next_hashes[1];
 	do {
 		if (cur_pos == MATCHFINDER_WINDOW_SIZE) {
 			hc_matchfinder_slide_window(mf);
@@ -364,13 +396,20 @@ hc_matchfinder_skip_positions(struct hc_matchfinder * const restrict mf,
 		mf->next_tab[cur_pos] = mf->hash4_tab[hash4];
 		mf->hash4_tab[hash4] = cur_pos;
 
-		next_seq4 = load_u32_unaligned(++in_next);
+		mf->next16_tab[cur_pos] = mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)];
+		mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)] = cur_pos;
+
+		next_seq4 = load_u32_unaligned(in_next + 1);
 		hash4 = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
+		hash16 = hash16_push(hash16, *(in_next + 16));
+		in_next++;
 		cur_pos++;
 	} while (--remaining);
 
 	prefetchw(&mf->hash4_tab[hash4]);
+	prefetchw(&mf->hash16_tab[hash16 % ARRAY_LEN(mf->hash16_tab)]);
 	next_hashes[0] = hash4;
+	next_hashes[1] = hash16;
 
 	return in_next;
 }
