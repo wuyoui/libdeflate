@@ -53,12 +53,7 @@
  *
  *				 Optimizations
  *
- * The main hash table and chains handle length 4+ matches.  Length 3 matches
- * are handled by a separate hash table with no chains.  This works well for
- * typical "greedy" or "lazy"-style compressors, where length 3 matches are
- * often only helpful if they have small offsets.  Instead of searching a full
- * chain for length 3+ matches, the algorithm just checks for one close length 3
- * match, then focuses on finding length 4+ matches.
+ * The main hash table and chains handle length 4+ matches only.
  *
  * The longest_match() and skip_positions() functions are inlined into the
  * compressors that use them.  This isn't just about saving the overhead of a
@@ -93,17 +88,11 @@
 
 #include "matchfinder_common.h"
 
-#define HC_MATCHFINDER_HASH3_ORDER	15
 #define HC_MATCHFINDER_HASH4_ORDER	16
 
-#define HC_MATCHFINDER_TOTAL_HASH_LENGTH		\
-	((1UL << HC_MATCHFINDER_HASH3_ORDER) +		\
-	 (1UL << HC_MATCHFINDER_HASH4_ORDER))
+#define HC_MATCHFINDER_TOTAL_HASH_LENGTH (1UL << HC_MATCHFINDER_HASH4_ORDER)
 
 struct hc_matchfinder {
-
-	/* The hash table for finding length 3 matches  */
-	mf_pos_t hash3_tab[1UL << HC_MATCHFINDER_HASH3_ORDER];
 
 	/* The hash table which contains the first nodes of the linked lists for
 	 * finding length 4+ matches  */
@@ -177,9 +166,9 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 {
 	u32 depth_remaining = max_search_depth;
 	const u8 *best_matchptr = in_next;
-	mf_pos_t cur_node3, cur_node4;
-	u32 hash3, hash4;
-	u32 next_seq3, next_seq4;
+	mf_pos_t cur_node4;
+	u32 hash4;
+	u32 next_seq4;
 	u32 seq4;
 	const u8 *matchptr;
 	u32 len;
@@ -200,16 +189,10 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 		goto out;
 
 	/* Get the precomputed hash codes.  */
-	hash3 = next_hashes[0];
-	hash4 = next_hashes[1];
+	hash4 = next_hashes[0];
 
 	/* From the hash buckets, get the first node of each linked list.  */
-	cur_node3 = mf->hash3_tab[hash3];
 	cur_node4 = mf->hash4_tab[hash4];
-
-	/* Update for length 3 matches.  This replaces the singleton node in the
-	 * 'hash3' bucket with the node for the current sequence.  */
-	mf->hash3_tab[hash3] = cur_pos;
 
 	/* Update for length 4 matches.  This prepends the node for the current
 	 * sequence to the linked list in the 'hash4' bucket.  */
@@ -218,33 +201,17 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 
 	/* Compute the next hash codes.  */
 	next_seq4 = load_u32_unaligned(in_next + 1);
-	next_seq3 = loaded_u32_to_u24(next_seq4);
-	next_hashes[0] = lz_hash(next_seq3, HC_MATCHFINDER_HASH3_ORDER);
-	next_hashes[1] = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
-	prefetchw(&mf->hash3_tab[next_hashes[0]]);
-	prefetchw(&mf->hash4_tab[next_hashes[1]]);
+	next_hashes[0] = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
+	prefetchw(&mf->hash4_tab[next_hashes[0]]);
 
 	if (best_len < 4) {  /* No match of length >= 4 found yet?  */
-
-		/* Check for a length 3 match if needed.  */
-
-		if (cur_node3 <= cutoff)
-			goto out;
-
-		seq4 = load_u32_unaligned(in_next);
-
-		if (best_len < 3) {
-			matchptr = &in_base[cur_node3];
-			if (load_u24_unaligned(matchptr) == loaded_u32_to_u24(seq4)) {
-				best_len = 3;
-				best_matchptr = matchptr;
-			}
-		}
 
 		/* Check for a length 4 match.  */
 
 		if (cur_node4 <= cutoff)
 			goto out;
+
+		seq4 = load_u32_unaligned(in_next);
 
 		for (;;) {
 			/* No length 4 match found yet.  Check the first 4 bytes.  */
@@ -354,37 +321,31 @@ hc_matchfinder_skip_positions(struct hc_matchfinder * const restrict mf,
 			      u32 * const restrict next_hashes)
 {
 	u32 cur_pos;
-	u32 hash3, hash4;
-	u32 next_seq3, next_seq4;
+	u32 hash4;
+	u32 next_seq4;
 	u32 remaining = count;
 
 	if (unlikely(count + 5 > in_end - in_next))
 		return &in_next[count];
 
 	cur_pos = in_next - *in_base_p;
-	hash3 = next_hashes[0];
-	hash4 = next_hashes[1];
+	hash4 = next_hashes[0];
 	do {
 		if (cur_pos == MATCHFINDER_WINDOW_SIZE) {
 			hc_matchfinder_slide_window(mf);
 			*in_base_p += MATCHFINDER_WINDOW_SIZE;
 			cur_pos = 0;
 		}
-		mf->hash3_tab[hash3] = cur_pos;
 		mf->next_tab[cur_pos] = mf->hash4_tab[hash4];
 		mf->hash4_tab[hash4] = cur_pos;
 
 		next_seq4 = load_u32_unaligned(++in_next);
-		next_seq3 = loaded_u32_to_u24(next_seq4);
-		hash3 = lz_hash(next_seq3, HC_MATCHFINDER_HASH3_ORDER);
 		hash4 = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
 		cur_pos++;
 	} while (--remaining);
 
-	prefetchw(&mf->hash3_tab[hash3]);
 	prefetchw(&mf->hash4_tab[hash4]);
-	next_hashes[0] = hash3;
-	next_hashes[1] = hash4;
+	next_hashes[0] = hash4;
 
 	return in_next;
 }
