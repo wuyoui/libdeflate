@@ -346,6 +346,8 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 			if (best_len >= nice_len)
 				goto out;
 		}
+		if (len >= ROLLING_WINDOW_SIZE)
+			goto out;
 
 		/* Continue to the next node in the list.  */
 		cur_node4 = mf->next_tab[cur_node4 & (MATCHFINDER_WINDOW_SIZE - 1)];
