@@ -89,8 +89,11 @@
 #include "matchfinder_common.h"
 
 #define HC_MATCHFINDER_HASH4_ORDER	16
+#define HC_MATCHFINDER_HASH16_ORDER	16
 
-#define HC_MATCHFINDER_TOTAL_HASH_LENGTH (1UL << HC_MATCHFINDER_HASH4_ORDER)
+#define HC_MATCHFINDER_TOTAL_HASH_LENGTH	\
+	(1UL << HC_MATCHFINDER_HASH4_ORDER) +	\
+	(1UL << HC_MATCHFINDER_HASH16_ORDER)
 
 struct hc_matchfinder {
 
@@ -98,9 +101,13 @@ struct hc_matchfinder {
 	 * finding length 4+ matches  */
 	mf_pos_t hash4_tab[1UL << HC_MATCHFINDER_HASH4_ORDER];
 
+	mf_pos_t hash16_tab[1UL << HC_MATCHFINDER_HASH16_ORDER];
+
 	/* The "next node" references for the linked lists.  The "next node" of
 	 * the node for the sequence with position 'pos' is 'next_tab[pos]'.  */
 	mf_pos_t next_tab[MATCHFINDER_WINDOW_SIZE];
+
+	mf_pos_t next16_tab[MATCHFINDER_WINDOW_SIZE];
 
 }
 #ifdef _aligned_attribute
@@ -120,6 +127,21 @@ hc_matchfinder_slide_window(struct hc_matchfinder *mf)
 {
 	matchfinder_rebase((mf_pos_t *)mf,
 			   sizeof(struct hc_matchfinder) / sizeof(mf_pos_t));
+}
+
+#define HASH16_MULTIPLIER	31
+#define HASH16_POP_FACTOR	1353309697	/* 31**16 % (1<<32) */
+static u8 hash16_history[16];
+static u32 hash16_hindex;
+
+static forceinline u32 hash16_push(u32 sum, u8 byte)
+{
+	sum -= hash16_history[hash16_hindex] * HASH16_POP_FACTOR;
+	sum *= HASH16_MULTIPLIER;
+	sum += byte;
+	hash16_history[hash16_hindex++] = byte;
+	hash16_hindex %= ARRAY_LEN(hash16_history);
+	return sum;
 }
 
 /*
@@ -166,8 +188,9 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 {
 	u32 depth_remaining = max_search_depth;
 	const u8 *best_matchptr = in_next;
-	mf_pos_t cur_node4;
+	mf_pos_t cur_node4, cur_node16;
 	u32 hash4;
+	u32 hash16;
 	u32 next_seq4;
 	u32 seq4;
 	const u8 *matchptr;
@@ -185,14 +208,16 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 	in_base = *in_base_p;
 	cutoff = cur_pos - MATCHFINDER_WINDOW_SIZE;
 
-	if (unlikely(max_len < 5)) /* can we read 4 bytes from 'in_next + 1'? */
+	if (unlikely(max_len < 17))
 		goto out;
 
 	/* Get the precomputed hash codes.  */
 	hash4 = next_hashes[0];
+	hash16 = next_hashes[1];
 
 	/* From the hash buckets, get the first node of each linked list.  */
 	cur_node4 = mf->hash4_tab[hash4];
+	cur_node16 = mf->hash16_tab[hash16];
 
 	/* Update for length 4 matches.  This prepends the node for the current
 	 * sequence to the linked list in the 'hash4' bucket.  */
@@ -325,7 +350,7 @@ hc_matchfinder_skip_positions(struct hc_matchfinder * const restrict mf,
 	u32 next_seq4;
 	u32 remaining = count;
 
-	if (unlikely(count + 5 > in_end - in_next))
+	if (unlikely(count + 17 > in_end - in_next))
 		return &in_next[count];
 
 	cur_pos = in_next - *in_base_p;
