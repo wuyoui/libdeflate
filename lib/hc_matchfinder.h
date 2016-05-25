@@ -133,16 +133,12 @@ hc_matchfinder_slide_window(struct hc_matchfinder *mf)
 }
 
 
-static u8 history[ROLLING_WINDOW_SIZE];
-static u32 hist_index;
-
 static forceinline u32
-hroll_update(u32 r, u8 byte)
+hroll_update(u32 r, const u8 *in_next)
 {
-	r = (r >> 8) ^ crc32_table[(u8)r ^ byte] ^ crc32_rolling[history[hist_index]];
-	history[hist_index++] = byte;
-	hist_index %= ARRAY_LEN(history);
-	return r;
+	return (r >> 8) ^
+		crc32_table[(u8)r ^ *(in_next + ROLLING_WINDOW_SIZE)] ^
+		crc32_rolling[*in_next];
 }
 
 static forceinline mf_pos_t *
@@ -231,7 +227,7 @@ hc_matchfinder_longest_match(struct hc_matchfinder * const restrict mf,
 
 	next_seq4 = load_u32_unaligned(in_next + 1);
 	next_hashes[0] = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
-	next_hashes[1] = hroll_update(hroll, *(in_next + ROLLING_WINDOW_SIZE));
+	next_hashes[1] = hroll_update(hroll, in_next);
 	prefetchw(&mf->hash4_tab[next_hashes[0]]);
 	prefetchw(hroll_bucket(mf, next_hashes[1]));
 
@@ -395,7 +391,7 @@ hc_matchfinder_skip_positions(struct hc_matchfinder * const restrict mf,
 
 		next_seq4 = load_u32_unaligned(in_next + 1);
 		hash4 = lz_hash(next_seq4, HC_MATCHFINDER_HASH4_ORDER);
-		hroll = hroll_update(hroll, *(in_next + ROLLING_WINDOW_SIZE));
+		hroll = hroll_update(hroll, in_next);
 		in_next++;
 		cur_pos++;
 	} while (--remaining);
