@@ -216,6 +216,69 @@ adler32_avx2_chunk(const __m256i *p, const __m256i *const end, u32 *s1, u32 *s2)
 #  include "../adler32_vec_template.h"
 #endif /* AVX2 implementation */
 
+/* SSSE3 implementation */
+#undef DISPATCH_SSSE3
+#if !defined(DEFAULT_IMPL) &&	\
+	(defined(__SSSE3__) || (X86_CPU_FEATURES_ENABLED &&	\
+				COMPILER_SUPPORTS_SSSE3_TARGET_INTRINSICS))
+#  define FUNCNAME		adler32_ssse3
+#  define FUNCNAME_CHUNK	adler32_ssse3_chunk
+#  define IMPL_ALIGNMENT	16
+#  define IMPL_SEGMENT_SIZE	16
+#  define IMPL_MAX_CHUNK_SIZE	MAX_CHUNK_SIZE
+#  ifdef __SSSE3__
+#    define ATTRIBUTES
+#    define DEFAULT_IMPL	adler32_ssse3
+#  else
+#    define ATTRIBUTES		__attribute__((target("ssse3")))
+#    define DISPATCH		1
+#    define DISPATCH_SSSE3	1
+#  endif
+#  include <tmmintrin.h>
+static forceinline ATTRIBUTES void
+adler32_ssse3_chunk(const __m128i *p, const __m128i *const end, u32 *s1, u32 *s2)
+{
+	const __m128i zeroes = _mm_setzero_si128();
+	const __v16qi multipliers = (__v16qi){
+		16, 15, 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,
+	};
+	const __v8hi ones = (__v8hi)_mm_set1_epi16(1);
+	__v4si v_s1 = (__v4si)zeroes;
+	__v4si v_s1_sums = (__v4si)zeroes;
+	__v4si v_s2 = (__v4si)zeroes;
+
+	do {
+		/* Load the next 16-byte segment */
+		__m128i bytes = *p++;
+
+		/* Multiply the bytes by 16...1 (the number of times they need
+		 * to be added to s2) and add adjacent products */
+		__v8hi sums = (__v8hi)_mm_maddubs_epi16(
+						bytes, (__m128i)multipliers);
+
+		/* Keep sum of all previous s1 counters, for adding to s2 later.
+		 * This allows delaying the multiplication by 16 to the end. */
+		v_s1_sums += v_s1;
+
+		/* Add the sum of each group of 8 bytes to the corresponding s1
+		 * counter */
+		v_s1 += (__v4si)_mm_sad_epu8(bytes, zeroes);
+
+		/* Add the sum of each group of 4 products of the bytes by
+		 * 16...1 to the corresponding s2 counter */
+		v_s2 += (__v4si)_mm_madd_epi16((__m128i)sums, (__m128i)ones);
+	} while (p != end);
+
+	/* Finish the s2 counters by adding the sum of the s1 values at the
+	 * beginning of each segment, multiplied by the segment size (16) */
+	v_s2 += (__v4si)_mm_slli_epi32((__m128i)v_s1_sums, 4);
+
+	/* Add the counters to the real s1 and s2 */
+	ADLER32_FINISH_VEC_CHUNK_128(s1, s2, v_s1, v_s2);
+}
+#  include "../adler32_vec_template.h"
+#endif /* SSSE3 implementation */
+
 /* SSE2 implementation */
 #undef DISPATCH_SSE2
 #if !defined(DEFAULT_IMPL) &&	\
@@ -322,6 +385,10 @@ arch_select_adler32_func(void)
 #ifdef DISPATCH_AVX2
 	if (features & X86_CPU_FEATURE_AVX2)
 		return adler32_avx2;
+#endif
+#ifdef DISPATCH_SSSE3
+	if (features & X86_CPU_FEATURE_SSSE3)
+		return adler32_ssse3;
 #endif
 #ifdef DISPATCH_SSE2
 	if (features & X86_CPU_FEATURE_SSE2)
