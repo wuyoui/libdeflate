@@ -46,12 +46,22 @@
 
 #include <limits.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "deflate_constants.h"
 #include "unaligned.h"
 
 #include "libdeflate.h"
+
+static forceinline u64 rdtsc(void)
+{
+	u32 tickl, tickh;
+
+	__asm__ __volatile__("rdtsc" : "=a" (tickl), "=d" (tickh));
+
+	return ((u64)tickh << 32) | tickl;
+}
 
 /*
  * If the expression passed to SAFETY_CHECK() evaluates to false, then the

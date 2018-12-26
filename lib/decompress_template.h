@@ -247,8 +247,14 @@ next_block:
 
 	/* Decompressing a Huffman block (either dynamic or static)  */
 
-	SAFETY_CHECK(build_offset_decode_table(d, num_litlen_syms, num_offset_syms));
-	SAFETY_CHECK(build_litlen_decode_table(d, num_litlen_syms, num_offset_syms));
+	{
+		u64 t = rdtsc();
+
+		SAFETY_CHECK(build_offset_decode_table(d, num_litlen_syms, num_offset_syms));
+		SAFETY_CHECK(build_litlen_decode_table(d, num_litlen_syms, num_offset_syms));
+		t = rdtsc() - t;
+		printf("%"PRIu64"\n", t);
+	}
 have_decode_tables:
 
 	/* The main DEFLATE decode loop  */
