@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/ebiggers/libdeflate.svg?branch=master)](https://travis-ci.org/ebiggers/libdeflate)
+
 # Overview
 
 libdeflate is a library for fast, whole-buffer DEFLATE-based compression and
@@ -33,8 +35,11 @@ By default, the following targets are built: the static library `libdeflate.a`,
 the shared library `libdeflate.so`, the `gzip` program, and the `gunzip` program
 (which is actually just a hard link to `gzip`).  Benchmarking and test programs
 such as `benchmark` are not built by default.  You can run `make help` to
-display the available build targets.  There are also several options which can
-be set on the `make` command line; see the Makefile for details.
+display the available build targets.
+
+There are also many options which can be set on the `make` command line, e.g. to
+omit library features or to customize the directories into which `make install`
+installs files.  See the Makefile for details.
 
 ## For Windows
 
@@ -153,11 +158,11 @@ This enables you to allocate an output buffer of the correct size without
 guessing.  However, libdeflate's decompression routines do optionally provide
 the actual number of output bytes in case you need it.
 
-Windows developers: note that the calling convention of libdeflate.dll is cdecl.
-This differs from the Windows API, which uses stdcall.  If you call into
-libdeflate.dll using a non-C/C++ language, or dynamically using LoadLibrary(),
-make sure to use the cdecl calling convention.  Using the wrong calling
-convention may crash your application.
+Windows developers: note that the calling convention of libdeflate.dll is
+"stdcall" -- the same as the Win32 API.  If you call into libdeflate.dll using a
+non-C/C++ language, or dynamically using LoadLibrary(), make sure to use the
+stdcall convention.  Using the wrong convention may crash your application.
+(Note: older versions of libdeflate used the "cdecl" convention instead.)
 
 # DEFLATE vs. zlib vs. gzip
 

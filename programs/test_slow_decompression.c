@@ -430,7 +430,9 @@ tmain(int argc, tchar *argv[])
 	u8 out[10000];
 	u64 t, tz;
 
-	program_invocation_name = get_filename(argv[0]);
+	begin_program(argv);
+
+	begin_performance_test();
 
 	/* static huffman case */
 	generate_empty_static_huffman_blocks(in, sizeof(in));
@@ -457,7 +459,7 @@ tmain(int argc, tchar *argv[])
 	 * FIXME: make it faster.
 	 */
 	putchar('\n');
-	ASSERT(t < 3 * tz);
+	ASSERT(t < 4 * tz);
 
 	/* original reproducer */
 	t = do_test_libdeflate("original repro", orig_repro, sizeof(orig_repro),
